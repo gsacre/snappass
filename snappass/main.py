@@ -5,7 +5,7 @@ import uuid
 import redis
 
 from cryptography.fernet import Fernet
-from flask import abort, Flask, render_template, request
+from flask import abort, Flask, render_template, request, jsonify, make_response
 from redis.exceptions import ConnectionError
 from werkzeug.urls import url_quote_plus
 from werkzeug.urls import url_unquote_plus
@@ -152,21 +152,56 @@ def clean_input():
 
     return TIME_CONVERSION[time_period], request.form['password']
 
+def not_found_api():
+    message = {
+            'status': 404,
+            'message': 'Not Found: ' + request.url,
+    }
+
+    return make_response(jsonify(message), 404)
+
+def unsupported_media_type_api():
+    message = {
+            'status': 415,
+            'message': 'Unsupported Media Type',
+    }
+
+    return make_response(jsonify(message), 415)
+
+def bad_request_api():
+    message = {
+            'status': 400,
+            'message': 'Bad Request',
+    }
+
+    return make_response(jsonify(message), 400)
+
+def make_base_url():
+    if NO_SSL:
+        base_url = request.url_root
+    else:
+        base_url = request.url_root.replace("http://", "https://")
+
+    return base_url
 
 @app.route('/', methods=['GET'])
 def index():
     return render_template('set_password.html')
 
+@app.route('/api', methods=['GET'])
+def index_api():
+    base_url = make_base_url()
+
+    return "Generate a password share link with the following command: \n\n" \
+           'curl -X POST -H "Content-Type:application/json" -d \'{"password":"password-here","ttl":"week | day | hour"}\' ' + base_url + "api\n"
 
 @app.route('/', methods=['POST'])
 def handle_password():
     ttl, password = clean_input()
     token = set_password(password, ttl)
 
-    if NO_SSL:
-        base_url = request.url_root
-    else:
-        base_url = request.url_root.replace("http://", "https://")
+    base_url = make_base_url()
+
     if URL_PREFIX:
         base_url = base_url + URL_PREFIX.strip("/") + "/"
     link = base_url + url_quote_plus(token)
@@ -191,6 +226,53 @@ def show_password(password_key):
 
     return render_template('password.html', password=password)
 
+@app.route('/api', methods=['POST'])
+def handle_password_api():
+    if not request.headers['Content-Type'] == 'application/json':
+        return unsupported_media_type_api()
+
+    payload = request.get_json()
+
+    password = payload.get('password', None)
+
+    if not password:
+        return bad_request_api()
+
+    time_period = payload.get('ttl', 'hour').lower()
+
+    if not time_period in TIME_CONVERSION:
+        return bad_request_api()
+
+    ttl = TIME_CONVERSION[time_period]
+
+    key = set_password(password, ttl)
+
+    base_url = make_base_url()
+
+    link_web = base_url + url_quote_plus(key)
+    link_api = base_url + "api/" + url_quote_plus(key)
+
+    data = {
+        'web' : link_web,
+        'api' : link_api,
+    }
+
+    return jsonify(data)
+
+@app.route('/api/<password_key>', methods=['GET'])
+def get_password_api(password_key):
+    password_key = url_unquote_plus(password_key)
+    password = get_password(password_key)
+    if not password:
+        return not_found_api()
+
+    base_url = make_base_url()
+
+    data = {
+        'password' : password
+    }
+
+    return jsonify(data)
 
 @check_redis_alive
 def main():
